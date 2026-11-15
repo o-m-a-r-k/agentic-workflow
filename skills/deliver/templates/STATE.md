@@ -15,10 +15,10 @@ Started: <ISO time>
 Profile: <name> | none
 Worktree <repo>: <path from this folder or a folder above it, or absolute> on <branch>, from <base> at <sha>
 Lane <name>: <path>, an extra worktree for a part built in parallel, merged into its repo's
-Step: take | discover | shape | design | build | verify | gate | read | deliver | audit | accept
+Step: take | discover | shape | design | build | verify | read | deliver | audit | accept
 Waiting for: nothing | worker: <role, started time> | the person: <what> | outside: <what, link>
-Approval: none | asked <time> | <the person's words>, <time>
-Question sheet: <first 12 of QUESTIONS.md's sha256, once the person has seen it>
+Approval: none | asked <time> | given: <the person's words>, <time>
+Question sheet: <first 12 of QUESTIONS.md's sha256, once frozen>
 Delivered: <ISO time> <where>
 Accepted: <ISO time>
 Left behind: none | <worker, run, server, container, data or file>: <created by, how to remove>
@@ -32,7 +32,7 @@ Standing instructions: none | <the person's words, time>
 
 The triage judge's rulings (`evidence/triage-<n>.md`).
 
-- [fixed] <what, where; the commit once it is made>
+- [fixed] <a `finding` or `fix here` item: what, where; the commit once it is made>
 - [hotfix <ticket>] <a wrong fact people act on, reachable now, outside this ticket>
 - [next <ticket>] <a bug whose fix touches a boundary>
 - [note] <wrong or worth having, not this ticket's; what shows it; in the handoff, no ticket>

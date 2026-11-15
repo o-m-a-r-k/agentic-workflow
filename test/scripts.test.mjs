@@ -666,9 +666,17 @@ test('ready holds every row on a settled ticket and names the row that breaks', 
   write(f.ev('verify-1.md'), `Commit: catalog@${head} web@${whead}\nVerdict: clean\n`);
   write(f.ev('read-1.md'), `Commit: web@${whead}\nVerdict: pass\n`);
   const R = () => { const r = f.R(); return { status: r.status, out: r.stdout, row: (n) => (r.stdout.match(new RegExp(`^\\| ${n} \\| (.*) \\|$`, 'm')) || [])[1] }; };
+  // the diff touches the loans boundary: a verification that names no boundary does not cover it
+  assert.match(R().row('verify'), /^fail: loans: no verify file names this boundary/);
+  write(f.ev('verify-9.md'), `Boundary: money\nCommit: catalog@${head}\nVerdict: clean\n`);
+  write(f.ev('verify-1.md'), `Boundary: loans\nCommit: catalog@${head} web@${whead}\nVerdict: clean\n`);
+  assert.match(R().row('verify'), /^ok \(loans: verify-1\.md says clean\)/, 'a boundary the diff does not touch is not asked for');
+  write(f.ev('verify-9.md'), `Boundary: money\nCommit: catalog@${head}\nVerdict: fix: 2\n`);
+  assert.match(R().row('verify'), /^fail: money: verify-9\.md says Verdict: fix, not clean/, 'but its findings do not vanish with it');
+  rmSync(f.ev('verify-9.md'));
   let r = R();
   assert.equal(r.status, 0, r.out);
-  assert.match(r.out, /^History: 1 runs, 0 failed$/m);
+  assert.match(r.out, /^History: 4 runs, 2 failed$/m);
   assert.match(r.row('lane'), /^ok \(floor critical, lane critical\)/);
   // lane
   edit(join(f.t, 'STATE.md'), 'Risk lane: critical', 'Risk lane: standard');
@@ -678,22 +686,36 @@ test('ready holds every row on a settled ticket and names the row that breaks', 
   // verify streams by boundary
   write(f.ev('verify-2.md'), `Boundary: loans\nCommit: catalog@${head} web@${whead}\nVerdict: fix: 1\n`);
   assert.match(R().row('verify'), /^fail: loans: verify-2\.md says Verdict: fix, not clean/);
-  write(f.ev('confirm-1.md'), `Boundary: loans\nCommit: catalog@${head}\nVerdict: closed\n`);
+  write(f.ev('confirm-1.md'), `Confirms: verify-2\nCommit: catalog@${head}\nVerdict: closed\n`);
   utimesSync(f.ev('confirm-1.md'), Date.now() / 1000 + 5, Date.now() / 1000 + 5);
   assert.match(R().row('verify'), /^fail: loans: confirm-1\.md no Commit: line names web/);
-  write(f.ev('confirm-1.md'), `Boundary: loans\nCommit: catalog@${head} web@${whead}\nVerdict: closed\n`);
+  write(f.ev('confirm-1.md'), `Confirms: verify-2\nCommit: catalog@${head} web@${whead}\nVerdict: closed\n`);
   utimesSync(f.ev('confirm-1.md'), Date.now() / 1000 + 5, Date.now() / 1000 + 5);
-  assert.match(R().row('verify'), /^ok \(verify-1\.md says clean; loans: confirm-1\.md says closed\)/);
+  assert.match(R().row('verify'), /^ok \(loans: confirm-1\.md says closed\)/);
+  // a verification from before the lane rose names no boundary: its findings stay open until a confirm names it,
+  // and a confirm of another verification, or of a design's answers, does not answer it
+  write(f.ev('verify-0.md'), `Commit: catalog@${head} web@${whead}\nVerdict: fix: 1\n`);
+  assert.match(R().row('verify'), /^fail: verify-0\.md says Verdict: fix, not clean/);
+  write(f.ev('confirm-2.md'), `Confirms: challenge-1\nCommit: catalog@${head} web@${whead}\nVerdict: closed\n`);
+  assert.match(R().row('verify'), /^fail: verify-0\.md says Verdict: fix, not clean/);
+  write(f.ev('confirm-2.md'), `Confirms: verify-0\nCommit: catalog@${head} web@${whead}\nVerdict: open: 1\n`);
+  assert.match(R().row('verify'), /^fail: confirm-2\.md says Verdict: open, not closed/);
+  write(f.ev('confirm-2.md'), `Confirms: verify-0\nCommit: catalog@${head} web@${whead}\nVerdict: closed\n`);
+  assert.match(R().row('verify'), /^ok \(loans: confirm-1\.md says closed\)/);
+  rmSync(f.ev('verify-0.md')); rmSync(f.ev('confirm-2.md'));
   // approval and the question sheet
   edit(join(f.t, 'BRIEF.md'), 'Undo: yes', 'Undo: no');
-  assert.match(R().row('approval'), /^fail: BRIEF\.md says Undo: no and STATE\.md's Approval is "missing"/);
+  assert.match(R().row('approval'), /^fail: Undo: no and STATE\.md's Approval is "missing"/);
   f.state('Screen: touched\nApproval: asked 2026-01-05T10:00Z', 'critical');
   edit(join(f.t, 'STATE.md'), 'Screen: none\n', '');
   assert.match(R().row('approval'), /^fail/);
   write(join(f.t, 'QUESTIONS.md'), '1. Show the fee on the receipt?\n');
   const q = createHash('sha256').update(readFileSync(join(f.t, 'QUESTIONS.md'))).digest('hex').slice(0, 12);
   assert.match(R().row('questions'), new RegExp(`^fail: no "Question sheet: ${q}" in STATE\\.md`));
-  f.state(`Screen: touched\nApproval: "go ahead", 2026-01-05T10:00Z\nQuestion sheet: ${q}`, 'critical');
+  f.state(`Screen: touched\nApproval: "no, not until finance signs off", 2026-01-05T10:00Z\nQuestion sheet: ${q}`, 'critical');
+  edit(join(f.t, 'STATE.md'), 'Screen: none\n', '');
+  assert.match(R().row('approval'), /^fail/, 'the person\'s refusal is not an approval');
+  f.state(`Screen: touched\nApproval: given: "go ahead", 2026-01-05T10:00Z\nQuestion sheet: ${q}`, 'critical');
   edit(join(f.t, 'STATE.md'), 'Screen: none\n', '');
   r = R();
   assert.equal(r.status, 0, r.out);
@@ -724,7 +746,7 @@ test('ready holds every row on a settled ticket and names the row that breaks', 
   const records = join(f.root, 'records.jsonl');
   run('record', f.t, '--records', records);
   const runs = +readFileSync(f.ev('ready.md'), 'utf8').match(/^History: (\d+) runs/m)[1], line = JSON.parse(readFileSync(records, 'utf8').trim());
-  assert.equal(line.ready_fails, runs - 3, 'every run failed but the three that passed');
+  assert.equal(line.ready_fails, runs - 5, 'every run failed but the five that passed');
   f.done();
 });
 
@@ -868,5 +890,148 @@ test('ready holds while a two-repo delivery lands one repo at a time, and only o
   commit(f.cat.path, 'another delivery undoes the change');
   git(f.cat.path, 'checkout', '-q', 'fix/EX-1');
   assert.match(R().row('base'), /^fail: catalog: HEAD does not contain main/);
+  f.done();
+});
+
+test('a two-repo ticket walked through its whole life: every script answers at every stage', () => {
+  const f = ticket({ web: true });
+  const records = join(f.root, 'records.jsonl');
+  const row = (r, n) => (r.stdout.match(new RegExp(`^\\| ${n} \\| (.*) \\|$`, 'm')) || [])[1];
+  const answered = (r, what) => assert.ok(r.status === 0 || r.status === 1, `${what} crashed: ${r.status} ${r.stderr}`);
+  const pathsRead = () => +(readFileSync(f.ev('lane.md'), 'utf8').match(/\((\d+) paths?\)/) || [])[1];
+  const confirm = (n, heads) => { write(f.ev(`confirm-${n}.md`), `Confirms: verify-1\nCommit: ${heads}\nVerdict: closed\n`); const t = Date.now() / 1000 + 5 * n; utimesSync(f.ev(`confirm-${n}.md`), t, t); };
+  const land = (p) => { git(p, 'checkout', '-q', 'main'); git(p, 'merge', '-q', '--no-ff', '--no-edit', 'fix/EX-1'); git(p, 'checkout', '-q', 'fix/EX-1'); };
+  // taken, nothing built: every script answers, none passes
+  for (const [what, r] of [['lane --paths', f.L('--paths')], ['lane', f.L()], ['gate', f.G()], ['ready', f.R()]]) { answered(r, `${what} at take`); assert.equal(r.status, 1, `${what} at take: ${r.stdout}`); }
+  // built
+  edit(join(f.cat.path, 'docs/readme.md'), 'library', 'the library');
+  let head = commit(f.cat.path, 'the change');
+  edit(join(f.w.path, 'src/api.ts'), '{}', '{ }');
+  let whead = commit(f.w.path, 'its consumer');
+  f.brief('standard', ['catalog/docs/readme.md', 'web/src/api.ts']);
+  assert.equal(f.L('--paths').status, 0);
+  assert.equal(f.L().status, 0);
+  assert.equal(pathsRead(), 2);
+  assert.equal(f.G().status, 0);
+  assert.match(row(f.R(), 'verify'), /^fail: no evidence\/verify/);
+  write(f.ev('verify-1.md'), `Commit: catalog@${head} web@${whead}\nVerdict: clean\n`);
+  assert.equal(f.R().status, 0);
+  // another delivery moves web's base through a file this change leaves alone
+  git(f.w.path, 'checkout', '-q', 'main');
+  write(join(f.w.path, 'src/other.ts'), 'export {};\n');
+  commit(f.w.path, 'another delivery');
+  git(f.w.path, 'checkout', '-q', 'fix/EX-1');
+  assert.match(row(f.R(), 'base'), /^fail: web: HEAD does not contain main/);
+  git(f.w.path, 'merge', '-q', '--no-edit', 'main');
+  assert.equal(f.L().status, 0);
+  assert.equal(pathsRead(), 2, 'the base\'s files are not the change\'s');
+  assert.equal(f.G().status, 0);
+  let r = f.R();
+  assert.equal(r.status, 0, r.stdout);
+  // a fix round
+  edit(join(f.w.path, 'src/api.ts'), '{ }', '{  }');
+  whead = commit(f.w.path, 'the fix');
+  assert.equal(f.L().status, 0);
+  r = f.R();
+  assert.match(row(r, 'verify'), /does not stand for HEAD/);
+  assert.match(row(r, 'gate'), /^fail/);
+  assert.equal(f.G().status, 0);
+  confirm(1, `catalog@${head} web@${whead}`);
+  r = f.R();
+  assert.equal(r.status, 0, r.stdout);
+  // delivery, one repo at a time, the branches then moved up to their merges
+  land(f.cat.path);
+  assert.equal(f.R().status, 0);
+  assert.equal(f.G('--check').status, 0);
+  land(f.w.path);
+  git(f.cat.path, 'merge', '-q', '--ff-only', 'main');
+  git(f.w.path, 'merge', '-q', '--ff-only', 'main');
+  assert.equal(f.R().status, 0);
+  assert.equal(f.L().status, 0);
+  assert.equal(pathsRead(), 2, 'a delivered change is still the change');
+  // the person rejects: a fix after delivery is measured on its own
+  edit(join(f.w.path, 'src/api.ts'), '{  }', '{   }');
+  whead = commit(f.w.path, 'the fix after delivery');
+  assert.equal(f.L().status, 0);
+  assert.equal(pathsRead(), 2, 'the repo still landed keeps its change; the other is measured from the base that holds its first delivery');
+  r = f.R();
+  assert.match(row(r, 'verify'), /does not stand for HEAD/);
+  assert.equal(f.G().status, 0);
+  confirm(2, `catalog@${git(f.cat.path, 'rev-parse', 'HEAD')} web@${whead}`);
+  r = f.R();
+  assert.equal(r.status, 0, r.stdout);
+  land(f.w.path);
+  assert.equal(f.R().status, 0);
+  // accepted: the record is written from the files
+  edit(join(f.t, 'STATE.md'), 'Hotfix: no', 'Hotfix: no\nDelivered: 2026-01-05T11:00Z main\nDelivered: 2026-01-05T13:00Z main\nAccepted: 2026-01-05T14:00Z');
+  r = run('record', f.t, '--records', records);
+  assert.equal(r.status, 0, r.stderr);
+  const line = JSON.parse(readFileSync(records, 'utf8').trim());
+  assert.equal(line.lane, 'standard');
+  assert.equal(line.first_delivered, '2026-01-05T11:00Z');
+  assert.equal(line.confirms, 2);
+  assert.ok(line.gate_runs >= 4 && line.ready_fails >= 4, JSON.stringify([line.gate_runs, line.ready_fails]));
+  assert.equal(line.minutes_to_delivery, 120, 'from Started to the first delivery');
+  // --print appends nothing and sets this run beside the earlier ones of its lane
+  r = run('record', f.t, '--records', records, '--print');
+  assert.equal(readFileSync(records, 'utf8').trim().split('\n').length, 1);
+  assert.match(r.stdout, /^record: EX-1, standard: 120 min to delivery .*no earlier ticket of this lane to compare$/m);
+  writeFileSync(records, JSON.stringify({ project: 'library-app', ticket: 'EX-0', lane: 'standard', minutes_to_delivery: 90 }) + '\n');
+  assert.match(run('record', f.t, '--records', records, '--print').stdout, /earlier standard tickets here: median 90 min over 1$/m);
+  f.done();
+});
+
+// The method's text and its scripts are two halves of one contract: what a role or template tells someone to write is
+// what a script reads. These fail when one half is reworded without the other.
+test('the text names every line the scripts read, and the scripts read every form the text prescribes', () => {
+  const skill = join(scripts, '..'), text = (p) => readFileSync(join(skill, p), 'utf8');
+  const says = { 'roles/verify.md': ['Verdict: clean', 'Commit: <repo>@<sha>', 'Boundary:', 'Undo: no', 'Check:', 'Result:', 'Seen:'], 'roles/confirm.md': ['Verdict: closed', 'Commit: <repo>@<sha>', 'Confirms: verify-<n>'], 'roles/read-score.md': ['Verdict: pass', 'Commit: <repo>@<sha>'], 'roles/audit.md': ['Findings:'], 'roles/deliver.md': ['missed.md'], 'templates/BRIEF.md': ['Lane:', 'Undo:', 'Screen:', '## Paths', '## Acceptance'], 'templates/DESIGN.md': ['## Surface', '## Decisions', 'Oracles changed'], 'SKILL.md': ['start <role>', 'return <role>: <status>', 'Question sheet:'] };
+  for (const [file, lines] of Object.entries(says)) for (const l of lines) assert.ok(text(file).includes(l), `${file} no longer names "${l}", which a script reads`);
+  // the state template, filled the way it says, is read whole
+  const f = ticket();
+  const filled = text('templates/STATE.md').replace(/^Risk lane:$/m, 'Risk lane: critical').replace('Screen: none | touched | shaped', 'Screen: shaped').replace('Hotfix: yes | no', 'Hotfix: no').replace(/^Delivered: .*$/m, 'Delivered: 2026-01-05T11:00Z main').replace(/^Accepted: .*$/m, 'Accepted: 2026-01-05T14:00Z').replace(/^- <missed purpose \| defect \| new wish>.*$/m, '- missed purpose: a\n- defect: b\n- new wish: c');
+  write(join(f.t, 'STATE.md'), filled);
+  const T = readTicket(f.t);
+  assert.deepEqual([T.lane, T.screen, T.hotfix, T.accepted], ['critical', 'shaped', 'no', '2026-01-05T14:00Z']);
+  assert.deepEqual(T.rejections.map((r) => r.class), ['missed purpose', 'defect', 'new wish']);
+  assert.deepEqual(T.found.map((x) => x.tag), ['fixed', 'hotfix', 'next', 'note', 'lead'], 'every tag the template offers is one the reader knows');
+  assert.deepEqual(T.found.slice(1, 3).map((x) => x.id), ['<ticket>', '<ticket>']);
+  // the log, as an orchestrator writes it: a note after the role does not lose the line
+  write(f.ev('log.md'), ['2026-01-05T09:00:00Z start discover', '2026-01-05T09:05:00Z return discover+build: done at abc1234, gate pass', '2026-01-05T09:06:00Z start build-2 (revise to the design)', '2026-01-05T09:20:00Z return build-2: done at abc1234, gate pass', '2026-01-05T09:21:00Z start verify-loans', '2026-01-05T09:30:00Z return verify-loans (verify-2): clean, found 1 (0 urgent), questions 0', '2026-01-05T09:31:00Z lane raised standard->critical: the diff touches loans', ''].join('\n'));
+  const log = readTicket(f.t).log;
+  assert.deepEqual(log.map((e) => `${e.kind} ${e.role}`), ['start discover', 'return discover', 'start build-2', 'return build-2', 'start verify-loans', 'return verify-loans']);
+  assert.equal(log.at(-1).status, 'clean, found 1 (0 urgent), questions 0');
+  assert.equal(log[1].status, 'done at abc1234, gate pass', 'the direct lane\'s one worker returns as discover+build and closes discover\'s start');
+  f.done();
+});
+
+test('work added to a brief is read with the rest; a change that cannot be undone, by the brief or by a verifier, is critical and needs the approval', () => {
+  const f = ticket();
+  edit(join(f.cat.path, 'docs/readme.md'), 'library', 'the library');
+  const head = commit(f.cat.path, 'the change');
+  f.brief('standard', ['catalog/docs/readme.md']);
+  assert.equal(f.L('--paths').status, 0);
+  writeFileSync(join(f.t, 'BRIEF.md'), readFileSync(join(f.t, 'BRIEF.md'), 'utf8') + '\n## Added: a late fee\n\n### Acceptance\n- A2: the fee is charged once\n\n### Paths (added)\n- catalog/src/fees/fee.ts\n');
+  const T = readTicket(f.t);
+  assert.deepEqual(T.paths, ['catalog/docs/readme.md', 'catalog/src/fees/fee.ts']);
+  assert.equal(T.acceptance.length, 2);
+  const l = f.L('--paths');
+  assert.equal(l.status, 1);
+  assert.match(l.stdout, /^Boundary money: catalog\/src\/fees\/fee\.ts$/m);
+  // undo
+  f.brief('standard', ['catalog/docs/readme.md']);
+  assert.equal(f.G().status, 0);
+  write(f.ev('verify-1.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
+  const row = (n) => (f.R().stdout.match(new RegExp(`^\\| ${n} \\| (.*) \\|$`, 'm')) || [])[1];
+  assert.match(row('lane'), /^ok/);
+  write(f.ev('verify-1.md'), `Commit: catalog@${head}\nUndo: no (the export cannot be recalled)\nVerdict: clean\n`);
+  assert.match(row('lane'), /^fail: the floor is critical \(cannot be undone\) and the lane is standard/);
+  assert.equal(f.L().status, 1, 'lane says so too, before ready does');
+  assert.match(row('approval'), /^fail: Undo: no and STATE\.md's Approval is "missing"/);
+  // the added work's own Undo line counts, with whatever punctuation follows the word
+  write(f.ev('verify-1.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
+  assert.match(row('lane'), /^ok/);
+  writeFileSync(join(f.t, 'BRIEF.md'), readFileSync(join(f.t, 'BRIEF.md'), 'utf8') + '\n## Added: purge returned loans\n\nUndo: no. The purged rows are gone.\n');
+  assert.match(row('lane'), /^fail: the floor is critical \(cannot be undone\)/);
   f.done();
 });

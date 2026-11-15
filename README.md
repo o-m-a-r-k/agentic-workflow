@@ -6,13 +6,13 @@ The plugin is five skills (deliver, onboard, design, test, triage), the files th
 
 ## How it works
 
-**Three lanes.** Discover names the lane; a script raises it when the paths touch a boundary the project has mapped; nothing lowers it.
+**Three lanes.** Discover names the lane; a script sets its floor when the paths touch a boundary the project has mapped; nothing lowers it.
 
 | Lane | When | What it gets |
 |---|---|---|
-| Direct | Restores or adjusts behaviour that already exists | Discover and build in one worker, a fresh verifier, the gate |
+| Direct | Restores or adjusts behaviour that already exists | Discover and build in one worker where no screen changes, a fresh verifier, the gate |
 | Standard | New behaviour, no boundary touched | A brief, a build, a fresh verifier, the gate |
-| Critical | A boundary or a migration is touched, it adds or alters how a fact people act on is computed or enforced outside the mapped code, or it cannot be undone | A short design with one challenge, a verifier per boundary with the project's fact checks, the gate, an audit where it is deployed |
+| Critical | A boundary or a migration is touched, it adds a rule for a fact people act on, or changes what one decides, outside the mapped code, or it cannot be undone | A short design with one challenge, a verifier per boundary with the project's fact checks, the gate, an audit where it is deployed |
 
 **Screens start from questions.** A new or restructured screen begins with a half-page question sheet (who arrives, what they ask, in what order) and an answer key written from seeded data. Three rough directions are built in the real app and you pick one from screenshots: the one planned wait on you. The built screen is then judged by fresh readers answering the questions from screenshots alone, scored against the key. An answer found only in a sentence counts as not given, so a screen cannot be passed by adding text.
 
@@ -30,17 +30,19 @@ flowchart TD
   S --> P["You pick a direction"]
   L1 -- "critical" --> De["Design"] --> Ch["Challenge, once"] --> Co["Confirm the answers"]
   L1 -- "direct, standard" --> B
-  P --> B["Build: failing test first"]
+  P --> B["Build: failing test first, then the gate"]
   Co --> B
   B --> L2["lane on the diff"]
   L2 -- "raised" --> De
   L2 --> V["Verify: fresh, from brief and diff"]
   L2 -- "visible change" --> R["Read: answers scored against the key"]
+  V --> Tj["Triage judge: what was found on the way"]
   V -- "finding with evidence" --> B
+  Tj -- "fix here" --> B
   R -- "wrong answer" --> B
-  V --> G["gate, once, on the settled tree"]
-  R --> G
-  G --> Rd["ready: every proof stands at this tree"]
+  B -. "before a second fix round" .-> Rc["Reconsider the approach"]
+  V --> Rd["ready: every proof stands at this tree"]
+  R --> Rd
   Rd --> Dl["Deliver, handoff"]
   Dl --> A["Audit (critical, deployed)"]
   Dl --> Ac["You accept"]

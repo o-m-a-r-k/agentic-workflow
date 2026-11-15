@@ -9,7 +9,8 @@
 // screen_paths (ticket.mjs's screenOf). The floor is critical when a path is in a boundary or a migration, else none.
 // The definition's watch lists (same shape as boundaries) are reported under Watch, for the verifier; never the floor.
 // New pages: added files under page_paths; with --paths, listed paths under page_paths that name no file at the base.
-// It never lowers a lane and never judges whether the change can be undone.
+// A change that cannot be undone ("Undo: no" in BRIEF.md or at the top of a verify file) sets the floor to critical too.
+// It never lowers a lane.
 // Writes evidence/lane.md. Exit 1 when the floor is critical and the ticket's lane (STATE.md's "Risk lane:", else
 // BRIEF.md's "Lane:") is lower, when no path could be read, or when a brief path cannot be placed; else 0.
 import { writeFileSync, mkdirSync } from 'node:fs';

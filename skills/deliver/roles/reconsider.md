@@ -14,7 +14,7 @@
 
 - `carry on`: the findings are separate slips; the fix round goes ahead.
 - `change`: the approach that reaches the outcome instead, with its paths and what happens to the commits already made.
-- `take out`: the item leaves the ticket. Name the commits to revert. It becomes a note, or its own ticket where its fix touches a boundary.
+- `take out`: the item leaves the ticket. Name the commits to revert. It becomes a note in the handoff.
 - `decide`: the product question, written under `## Questions`; nothing more is built on it until the decision judge answers.
 
 Prefer the ruling that makes the outcome true with the least change. You fix nothing and raise no new findings.

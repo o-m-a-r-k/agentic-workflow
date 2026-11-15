@@ -1,6 +1,6 @@
 # Default model and effort per role and harness. The project definition and ~/.agents/workflow.yaml override these;
 # a role or field left out falls through to the next source, and in the end to the session's own model.
-# A checker runs at a higher effort than the author it checks. Codex models are left to the session.
+# Codex models are left to the session.
 roles:
   claude:
     discover:    { model: opus,   effort: high }

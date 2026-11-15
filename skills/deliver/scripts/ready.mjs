@@ -7,22 +7,26 @@
 //   base      each worktree's HEAD contains its base ref's tip (origin/<from>, else <from>; local refs), or the base's
 //             tip is exactly the tree this script last passed on: a repo whose delivery landed stays ready while the
 //             next repo's step is taken
-//   lane      the floor from the current diff (ticket.mjs's laneFacts) is not above STATE.md's "Risk lane:"
-//   verify    at least one evidence/verify-<n>.md. Per stream (on the critical lane each "Boundary: <kind>" a verify or
-//             confirm file names is its own stream; otherwise one stream): the newest verify by number, unless the
-//             newest confirm by number is newer by file time, then that confirm. A verify is clear with "Verdict:
-//             clean", a confirm with "Verdict: closed"; its "Commit: <repo>@<sha>" lines name every worktree the change
-//             touches, each on a commit that stands for HEAD (ticket.mjs's proofRules)
+//   lane      the floor from the current diff and from "Undo: no" (ticket.mjs's laneFacts) is not above STATE.md's
+//             "Risk lane:"
+//   verify    at least one evidence/verify-<n>.md. A stream is the verify files with one "Boundary:" value (or none),
+//             judged by its newest verify by number. That verify is answered by the newest confirm whose
+//             "Confirms:" line names it, if there is one: then the confirm must say "Verdict: closed"; otherwise the
+//             verify must say "Verdict: clean". Asked for, and so also held to commits that stand for HEAD
+//             (ticket.mjs's proofRules; its "Commit: <repo>@<sha>" lines name every worktree the change touches): on
+//             the critical lane each boundary the current diff touches, or where it touches none the streams that
+//             name what they verified; elsewhere every stream. A stream not asked for still fails while its
+//             findings are unanswered
 //   checks    every CHECKS.json check due "before delivery" passed in evidence/checks.json with its current spec, on
 //             commits that stand. On the critical lane at least one such check is needed; elsewhere none is "ok (none)"
 //   read      with "Screen: touched" or "shaped": the highest-numbered evidence/read-<n>.md says "Verdict: pass" and its
 //             "Commit:" lines name every worktree whose change touches screen_paths, with no screen file of the change changed
 //             since (a base that moved without touching the change's screen files keeps the read, as it keeps a verify)
-//   approval  with BRIEF.md's "Undo: no": STATE.md's "Approval:" is set, and is not "none" or "asked…"
+//   approval  with "Undo: no" in BRIEF.md or at the top of a verify file: STATE.md's "Approval:" starts "given"
 //   questions with QUESTIONS.md: STATE.md's "Question sheet: <12 hex>" is the first 12 hex of its sha256
 // Writes evidence/ready.md (its History line counts the runs and the failed ones) and, on a pass, evidence/ready.json
 // (each repo's tree and the base its change was measured from). Exit 0 when every row holds, else 1.
-import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ticket, definitionOf, proofRules, read, field, fields, sha, laneFacts, laneRank, gateCheck, behindOf, dueKind, specOf, namesBetween, screenOf } from './ticket.mjs';
 
@@ -48,7 +52,7 @@ row('base', !T.repos.length ? fail('no worktree') : behind.length ? fail(behind.
 
 // lane
 const F = laneFacts(T, def, false);
-row('lane', laneRank(T.lane) < 0 ? fail('STATE.md has no "Risk lane: direct | standard | critical"') : F.floor === 'critical' && laneRank(T.lane) < laneRank('critical') ? fail(`the floor is critical (${[...F.kinds.map((k) => k.kind), ...(F.migrations.length ? ['migrations'] : [])].join(', ')}) and the lane is ${T.lane}`) : `ok (floor ${F.floor}, lane ${T.lane})`);
+row('lane', laneRank(T.lane) < 0 ? fail('STATE.md has no "Risk lane: direct | standard | critical"') : F.floor === 'critical' && laneRank(T.lane) < laneRank('critical') ? fail(`the floor is critical (${[...F.kinds.map((k) => k.kind), ...(F.migrations.length ? ['migrations'] : []), ...(T.undo === 'no' ? ['cannot be undone'] : [])].join(', ')}) and the lane is ${T.lane}`) : `ok (floor ${F.floor}, lane ${T.lane})`);
 
 // verify
 const standsAll = (t) => {
@@ -62,16 +66,23 @@ const standsAll = (t) => {
 {
   const V = /^verify-(\d+)\.md$/, C = /^confirm-(\d+)\.md$/;
   const head = (f) => read(join(T.ev, f)).split('\n').slice(0, 12).join('\n');
-  const stream = (f) => (critical ? field(head(f), 'Boundary').toLowerCase().split(/\s/)[0] : '');
+  const of = (f) => field(head(f), 'Boundary').toLowerCase().split(/\s/)[0];
   const verifies = top(V), confirms = top(C);
+  const confirmOf = (v) => confirms.filter((c) => fields(head(c), 'Confirms').some((x) => x.replace(/[`*]/g, '').split(/[\s,]+/).includes(v.replace(/\.md$/, '')))).at(-1);
+  const kinds = critical ? F.kinds.map((k) => k.kind.toLowerCase()) : [];
+  const streams = [...new Set(verifies.map(of))];
+  const asked = !critical ? streams : kinds.length ? kinds : streams.filter(Boolean);
   if (!verifies.length) row('verify', fail('no evidence/verify-<n>.md'));
+  else if (!asked.length) row('verify', fail('on the critical lane no verify file says what it verified ("Boundary: <kind>")'));
   else {
-    const streams = [...new Set(verifies.map(stream))];
-    const out = streams.map((s) => {
-      const v = verifies.filter((f) => stream(f) === s).at(-1), c = confirms.filter((f) => stream(f) === s).at(-1);
-      const judged = c && statSync(join(T.ev, c)).mtimeMs > statSync(join(T.ev, v)).mtimeMs ? c : v, t = read(join(T.ev, judged));
-      const want = judged === c ? 'closed' : 'clean', got = verdictOf(t), st = got === want ? standsAll(t) : '';
-      return { s, ok: got === want && !st, text: `${s ? `${s}: ` : ''}${judged} ${got === want ? (st ? st : `says ${want}`) : `says Verdict: ${got || '(none)'}, not ${want}`}` };
+    const out = [...new Set([...asked, ...streams])].flatMap((s) => {
+      const v = verifies.filter((f) => of(f) === s).at(-1), label = s ? `${s}: ` : '';
+      if (!v) return [{ ok: false, text: `${s}: no verify file names this boundary` }];
+      const c = confirmOf(v), judged = c || v, t = read(join(T.ev, judged)), want = c ? 'closed' : 'clean', got = verdictOf(t);
+      if (got !== want) return [{ ok: false, text: `${label}${judged} says Verdict: ${got || '(none)'}, not ${want}` }];
+      if (!asked.includes(s)) return [];
+      const st = standsAll(t);
+      return [{ ok: !st, text: `${label}${judged} ${st || `says ${want}`}` }];
     });
     row('verify', out.every((o) => o.ok) ? `ok (${out.map((o) => o.text).join('; ')})` : fail(out.filter((o) => !o.ok).map((o) => o.text).join('; ')));
   }
@@ -110,7 +121,7 @@ else {
 
 // approval and the question sheet
 if (T.undo !== 'no') row('approval', 'ok (none needed)');
-else { const a = field(T.state, 'Approval'); row('approval', !a || /^(none|asked)\b/i.test(a) ? fail(`BRIEF.md says Undo: no and STATE.md's Approval is "${a || 'missing'}"`) : 'ok'); }
+else { const a = field(T.state, 'Approval'); row('approval', /^given\b/i.test(a) ? 'ok' : fail(`Undo: no and STATE.md's Approval is "${a || 'missing'}", not "given: …"`)); }
 const qs = join(dir, 'QUESTIONS.md');
 if (!existsSync(qs)) row('questions', 'ok (none)');
 else { const want = sha(readFileSync(qs, 'utf8')), have = (field(T.state, 'Question sheet').match(/^[0-9a-f]{12}\b/) || [])[0]; row('questions', have === want ? 'ok' : fail(have ? `QUESTIONS.md changed since the person saw it (${have}, now ${want})` : `no "Question sheet: ${want}" in STATE.md`)); }

@@ -18,6 +18,6 @@
 - The top question gets the most prominent place and a computed answer, not the raw fields it derives from. A field that answers no question goes behind a disclosure or is cut.
 - Take references from the screens the project's design reference lists as accepted.
 - Where the data does not exist yet, use seeded stand-in data and say so. On the critical lane, state what data and permissions your direction needs.
-- Capture it as `evidence/shape/<idea>@<sha>.png` on a branch or worktree of your own, and write one line on what your direction gives up.
+- Capture it as `evidence/shape/<idea>@<sha>.png` in a detached worktree of your own, with no branch to delete later, and write one line on what your direction gives up.
 
 **You return** one line: `shape: sheet ready, <n> questions, <n> scenarios, questions <n>` or `shape <idea>: built at <sha>, gives up <what>, questions <n>`.

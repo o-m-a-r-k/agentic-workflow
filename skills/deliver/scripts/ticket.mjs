@@ -12,6 +12,18 @@ export const vals = (args, k) => args.flatMap((a, i) => (a === k ? [args[i + 1]]
 export const field = (t, k) => (t.match(new RegExp(`^[\\s>*_-]*${k}[*_]*:[*_]*[ \\t]*(.*)$`, 'im')) || [])[1]?.trim() ?? '';
 export const fields = (t, k) => [...t.matchAll(new RegExp(`^[\\s>*_-]*${k}[*_]*:[*_]*[ \\t]*(.*)$`, 'gim'))].map((m) => m[1].trim());
 export const section = (t, name) => { const s = t.split(/^## /m).find((c) => c.split('\n')[0].trim().toLowerCase() === name.toLowerCase()); return s ? s.slice(s.indexOf('\n') + 1) : ''; };
+// Every section whose heading starts with that name, at any level from ## to ####, joined: work added to a ticket adds its own.
+export const sections = (t, name) => {
+  const out = [];
+  let on = 0;
+  for (const l of t.split('\n')) {
+    const h = l.match(/^(#{2,4}) +(.*?)\s*$/);
+    if (h && on && h[1].length <= on) on = 0;
+    if (h && new RegExp(`^${name}\\b`, 'i').test(h[2])) { on = h[1].length; continue; }
+    if (on) out.push(l);
+  }
+  return out.join('\n');
+};
 // Name lists from git, read NUL-separated so that no name is quoted or escaped.
 const Q = ['-c', 'core.quotePath=false'];
 const z = (o) => (o === null ? null : o.split('\0').filter((x) => x !== ''));
@@ -161,15 +173,17 @@ export function ticket(dir) {
     rejections: bullets(section(state, 'Rejections')).map((l) => { const m = l.match(/^(missed purpose|defect|new wish)\s*:\s*(.*)$/i); return m ? { class: m[1].toLowerCase(), text: m[2] } : { class: '', text: l }; }),
     found: bullets(section(state, 'Found on the way')).map((l) => { const m = l.match(/^\[(fixed|hotfix|next|filed|note|dropped|lead)\b([^\]]*)\]\s*(.*)$/i); return m ? { tag: m[1].toLowerCase(), id: m[2].trim(), text: m[3] } : { tag: '', id: '', text: l }; }),
     briefLane: word(brief, 'Lane'),
-    undo: word(brief, 'Undo'),
+    // The change cannot be undone when any "Undo:" line of the brief says so (work added to a ticket has its own), or
+    // the top of a verify file does: a verifier who finds it writes "Undo: no" there.
+    undo: [...fields(brief, 'Undo'), ...(existsSync(ev) ? readdirSync(ev) : []).filter((f) => /^verify-\d+\.md$/.test(f)).flatMap((f) => fields(read(join(ev, f)).split('\n').slice(0, 12).join('\n'), 'Undo'))].some((v) => /^no\b/i.test(v)) ? 'no' : word(brief, 'Undo'),
     // A Paths line's first word is the path; anything after it is a note.
-    paths: bullets(section(brief, 'Paths')).map((l) => normPath(l.split(/\s+/)[0])).filter(Boolean),
-    acceptance: bullets(section(brief, 'Acceptance')).filter((l) => /^A\d+\b/.test(l)),
+    paths: bullets(sections(brief, 'Paths')).map((l) => normPath(l.split(/\s+/)[0])).filter(Boolean),
+    acceptance: bullets(sections(brief, 'Acceptance')).filter((l) => /^A\d+\b/.test(l)),
     oraclesChanged: field(design, 'Oracles changed').split(',').map(normPath).filter((x) => x && !/^none$/i.test(x)),
     decisions: section(design, 'Decisions').split(/^### /m).slice(1),
     surface: surface(design),
     proofs: read(join(ev, 'proof.jsonl')).split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }),
-    log: read(join(ev, 'log.md')).split('\n').flatMap((l) => { const m = l.trim().match(/^(\S+)\s+(start|return)\s+([^:\s]+)\s*(?::\s*(.*))?$/); const t = m && Date.parse(m[1]); return m && !isNaN(t) ? [{ time: t, kind: m[2], role: m[3], status: (m[4] || '').trim() }] : []; }),
+    log: read(join(ev, 'log.md')).split('\n').flatMap((l) => { const m = l.trim().match(/^(\S+)\s+(start|return)\s+([^:\s+]+)[^:]*(?::\s*(.*))?$/); const t = m && Date.parse(m[1]); return m && !isNaN(t) ? [{ time: t, kind: m[2], role: m[3], status: (m[4] || '').trim() }] : []; }),
   };
 }
 
@@ -226,6 +240,7 @@ export function laneFacts(T, def, fromBrief) {
   const boundaries = Object.entries(def.lists('boundaries')).map(([kind, globs]) => ({ kind, take: matcher(globs) }));
   const migration = matcher(def.list('migrations') || []), page = matcher(def.list('page_paths') || []), screen = screenOf(def);
   const notes = [], unplaced = [], paths = [];
+  if (T.undo === 'no') notes.push('the change cannot be undone (Undo: no): the floor is critical');
   if (fromBrief) {
     const at = {};
     if (!T.brief) notes.push('no BRIEF.md');
@@ -249,7 +264,7 @@ export function laneFacts(T, def, fromBrief) {
   const kinds = boundaries.map((b) => ({ kind: b.kind, paths: paths.filter((x) => any(b.take, x)).map((x) => x.path) })).filter((b) => b.paths.length);
   const watched = Object.entries(def.lists('watch')).map(([kind, globs]) => { const take = matcher(globs); return { kind, paths: paths.filter((x) => any(take, x)).map((x) => x.path) }; }).filter((b) => b.paths.length);
   const migrations = paths.filter((x) => any(migration, x)).map((x) => x.path);
-  return { boundaries: boundaries.length, paths, notes, unplaced, kinds, watched, migrations, pages: paths.filter((x) => x.added && page(x.path)).map((x) => x.path), screenTouched: paths.some((x) => any(screen, x)), floor: kinds.length || migrations.length ? 'critical' : 'none' };
+  return { boundaries: boundaries.length, paths, notes, unplaced, kinds, watched, migrations, pages: paths.filter((x) => x.added && page(x.path)).map((x) => x.path), screenTouched: paths.some((x) => any(screen, x)), floor: kinds.length || migrations.length || T.undo === 'no' ? 'critical' : 'none' };
 }
 
 // The gate as the definition and the current diff make it: each `gate:` entry, what selects it and the files that

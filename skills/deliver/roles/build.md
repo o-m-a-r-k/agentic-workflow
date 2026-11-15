@@ -12,7 +12,7 @@
 - **For a screen:** build the picked direction. Each state axis changes what a place shows; it never adds a paragraph. Words come last: before adding a sentence, try reorder, group, emphasise, a status component, a better label. A sentence you still need names the question it answers and sits where its case occurs. Capture every scenario and axis value the question sheet names as `evidence/screens/<state>@<sha>.png`, with the screen's visible text beside it as `<state>@<sha>.txt`, the way the definition says. You never see `ANSWERS.md`; seed each scenario through the product's real paths as the sheet describes it, and say in `evidence/build.md` where the seeded records differ from that description.
 - **What you cannot settle:** a fact that changes the design returns `to design`; a product choice goes under `## Questions`.
 - **A finding is a claim.** Check it, then fix it and say where, or dispute it with evidence. A fix touches what the finding names, plus tests.
-- Bring the branch up to date with its base, then run `gate <ticket> --definition …`; fix what it fails. Leave the worktree clean and the running stack up for the verifier where the definition allows, naming how to stop it.
+- Bring the branch up to date with its base, then run `gate <ticket> --definition …`, and on the critical lane `checks <ticket> --definition …`; fix what they fail. Leave the worktree clean and the running stack up for the verifier where the definition allows, naming how to stop it.
 
 **You write** the commits, the proof lines, the captures, and `evidence/build.md`: what is done, what is not, `## Found on the way`, `## Questions`.
 

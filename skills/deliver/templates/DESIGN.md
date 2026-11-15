@@ -36,4 +36,8 @@ Each acceptance check of the brief and each Surface line: the test or oracle tha
 
 ## Objections answered
 
-- <challenge-<n> objection>: <changed how | disputed, with the evidence; ruled by decide-<k>>
+- <challenge-<n> objection>: <changed how | disputed, with the run that settles it>
+
+## Questions
+
+- Q1: <a product question no source here settles>

@@ -15,7 +15,3 @@
 **You write** your file in the folder: the table of question by scenario with answer, where, and element or sentence; then what you worked out.
 
 **You return** one line: `read: <n> answered, <n> only from a sentence, <n> not asked, questions 0` or `read: blocked — <why>`.
-
-## For the orchestrator, not the reader
-
-Compare each answer with `ANSWERS.md`, and write `evidence/read-<n>.md`, the next free number: `Commit: <repo>@<sha>` of the captures, for every repository whose screens changed, `Verdict: pass` or `Verdict: fix: <count>`, and what counted. What counts: a wrong answer; an answer that would lead to a wrong or irreversible action; an answer found only in a sentence (it counts as not given); a captured state that is broken, clipped or misleading. With three readers, a point only one raised with no wrong answer behind it is dropped. What does not count: "could be clearer", a preference between layouts that both pass, wording. A question is removed from a scenario only when the answer key already says "not asked here", or every reader marked it so; each removal is listed in the handoff for the person. What counts goes to a verifier to confirm on the running screen, then to the builder; the fix changes what the screen shows. After the fix, one reader reads the changed states only, and only its answers on those states count.

@@ -1,6 +1,6 @@
 # Question sheet: <screen>
 
-Half a page. Frozen once the person has seen it; everything later is judged against it and the answer key.
+Half a page. Frozen once its hash is recorded in `STATE.md`; everything later is judged against it and the answer key.
 
 Who arrives, and from where: <the person, what they were doing just before>
 What a wrong reading costs them: <one line>
