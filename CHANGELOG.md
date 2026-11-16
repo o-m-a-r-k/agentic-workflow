@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.1
+
+From four tickets where the triage judge put a ticket's own work outside it and the person put it back: wordings of the kind the ticket was fixing filed as a new ticket; more cases of a ticket's own defect opened as two tickets; a lead its brief rested on ruled "next ticket" nine hours later because its fix sat in a boundary; a raw code on the ticket's own page left as a note because its fix needed a product choice; small older defects left as notes that the person added back; and a finished ticket parked seven hours for a test that fails on the base one morning a week, which the same text had fixed in the ticket on two others.
+
+- **The ticket's own work is fixed in the ticket.** The judge rules another case of the defect the ticket exists to end, or something wrong its own work rests on, a finding wherever its fix sits; one nobody has shown needs a run the environments can make, which the builder makes first. Discover puts in the brief what it meets of this on the ticket's ground. A finding in a boundary the design does not cover goes to the designer first.
+- **A failing acceptance check, gate or due check is a finding whatever its cause.** A wait is a step only where the definition names one; anything else has its cause fixed in the ticket.
+- **What is shown wrong and has a small fix is fixed in the ticket.** The weighing towards a note is replaced by an ordered list of rulings, and the ratio between the ticket and what it takes in by one question: is it still the ticket the person asked for. Everything a delivery rules the next ticket is one ticket.
+- **A product choice is no reason to rule an item out.** The judge writes it under `## Questions`, the decision judge answers before the fix round, and the builder gets the answer with the item.
+- **A fix round that holds a triage item always ends in a confirming check,** and before a delivery step the orchestrator sees that every item ruled fixed has its commit and a confirm line.
+
 ## 0.17.0
 
 A replacement of the method, from tickets that took days: a fifth delivery of one ticket, a plan at its sixth revision after 41 worker returns, small bugs with four to six challenge rounds, and a screen read three times whose fixes were added sentences.

@@ -34,6 +34,6 @@ The triage judge's rulings (`evidence/triage-<n>.md`).
 
 - [fixed] <a `finding` or `fix here` item: what, where; the commit once it is made>
 - [hotfix <ticket>] <a wrong fact people act on, reachable now, outside this ticket>
-- [next <ticket>] <a bug whose fix touches a boundary>
+- [next <ticket>] <what is shown wrong and not fixed here: a fix that touches a boundary, what the ticket had no room for; one ticket for all of it>
 - [note] <wrong or worth having, not this ticket's; what shows it; in the handoff, no ticket>
 - [lead] <what may be wrong, why it could not be shown, what would show it>
