@@ -1,11 +1,11 @@
 ---
 name: triage
-description: Decide what becomes of everything found while working on a ticket (fix it here, open a hotfix or next ticket, note it in the handoff), once, by one fresh judge who sees all of it together, so related bugs get fixed without the ticket or the backlog growing. Use when reporting something a ticket did not ask for, and when judging what was reported.
+description: Decide what becomes of everything found while working on a ticket (fix it here, open a hotfix or next ticket, note it in the handoff), by a fresh judge who sees the ticket and earlier rulings together, so related bugs get fixed without the ticket or the backlog growing. Use when reporting something a ticket did not ask for, and when judging what was reported.
 ---
 
 # What a found item becomes
 
-Work on a ticket turns up things it did not ask for. The workers report them. One fresh judge places them all, once, with the whole ticket in view.
+Work on a ticket turns up things it did not ask for. The workers report them. A fresh judge places the reported items with the whole ticket in view. Later evidence receives the same rulings; carry earlier decisions forward unless the evidence changes them.
 
 ## What is not a found item
 
@@ -43,4 +43,4 @@ A product choice a fix needs is no reason to rule an item out, and you decide no
 
 ## When
 
-When every verifier of the delivery has returned; an urgent item is ruled at once, on its own. What is ruled `fix here` joins the verifier's findings in the one fix round, each as its own commit with its own test. What is found after that is a note unless it is urgent; the handoff lists it.
+When every verifier of the delivery has returned; an urgent item is ruled at once, on its own. What is ruled `fix here` joins the verifier's findings in the one fix round, each as its own commit with its own test. When new items arrive afterward, a fresh judge rules on those items with the earlier rulings in view. Revisit an earlier item only when new evidence changes it. Discovery time never determines whether an item is a finding, a ticket or a note.

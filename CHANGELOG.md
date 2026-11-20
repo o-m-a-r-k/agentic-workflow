@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.2
+
+From late findings reduced to notes by their arrival time, and failures left unexplained after a retry passed with fewer workers.
+
+- Late findings receive the same evidence-based triage as earlier findings. Fresh judges receive previous rulings and reconsider only what new evidence changes.
+- A retry under changed concurrency, load, timeout or selection preserves the original failure. Closing it requires evidence explaining the failure and proving the applicable acceptance conditions. Otherwise it remains open for triage.
+- The chat handoff names unresolved failures, notes and leads with their disposition and recommended next action, including when the full report is posted in a tracker.
+
 ## 0.17.1
 
 From four tickets where the triage judge put a ticket's own work outside it and the person put it back: wordings of the kind the ticket was fixing filed as a new ticket; more cases of a ticket's own defect opened as two tickets; a lead its brief rested on ruled "next ticket" nine hours later because its fix sat in a boundary; a raw code on the ticket's own page left as a note because its fix needed a product choice; small older defects left as notes that the person added back; and a finished ticket parked seven hours for a test that fails on the base one morning a week, which the same text had fixed in the ticket on two others.

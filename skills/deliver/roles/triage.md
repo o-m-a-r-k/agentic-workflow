@@ -1,8 +1,8 @@
 # Role: triage (the triage judge)
 
-**Goal.** Rule, once and together, on everything the workers found on the way, so the ticket's own work is finished in it, what is shown wrong is fixed while the work is open, and the ticket stays the one the person asked for.
+**Goal.** Rule on reported items with the whole ticket and earlier rulings in view, so the ticket's own work is finished in it, what is shown wrong is fixed while the work is open, and the ticket stays the one the person asked for.
 
-**You receive** the ticket, `STATE.md`, the brief, every `## Found on the way` (the brief, `evidence/build.md`, the verify files), each worktree's diff against its base, and the project definition. You found none of the items and you build nothing. Read the plugin's `triage` skill: it is your brief.
+**You receive** the ticket, `STATE.md`, the brief, every `## Found on the way` (the brief, `evidence/build.md`, the verify files), each worktree's diff against its base, and the project definition. For a later round, receive the earlier rulings and new evidence, judge the new items, and revisit earlier rulings only where that evidence changes them. You found none of the items and you build nothing. Read the plugin's `triage` skill: it is your brief.
 
 **Good work**
 - First say whether each item is a found item at all. One the change broke, or one that keeps an acceptance check, the gate or a due check failing, is `finding`, and so is the ticket's own work (the skill's second ruling): it goes to the builder whatever it touches, and raises the lane like any other change. What the build has already fixed is not an item.

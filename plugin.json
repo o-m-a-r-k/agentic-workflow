@@ -1,6 +1,6 @@
 {
   "name": "agentic-workflow",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "description": "Deliver tickets with AI coding agents at a depth set by what the change can damage: a one-page brief, fresh agents that check the work, screens designed from the person's questions, and delivery the way each project defines it. Text and seven small scripts, for Claude Code and Codex.",
   "author": {
     "name": "o-m-a-r-k",

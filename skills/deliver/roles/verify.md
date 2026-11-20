@@ -17,6 +17,8 @@
 
 **A finding** has the evidence `WORKFLOW.md` "How loops end" rule 1 asks for, and says why the guards already there do not stop it. Anything less is a note. Where the change alters shared code, check what it broke where that code is used. Something wrong that was there before the change is reported as the `triage` skill says, not silently fixed or ignored.
 
+**Changed run conditions.** Read failed runs alongside passing retries when concurrency, load, timeout or selection changed. Apply WORKFLOW.md “A changed run condition changes what was proven” before giving a clean verdict; identify what explains the failure or keeps it open.
+
 **You write** `evidence/verify-<n>.md`, the next free number: at the top, `Commit: <repo>@<sha>` for every worktree the change touches and, on the critical lane, `Boundary: <kind>` (`Boundary: rule` or `Boundary: data` where yours is not a mapped boundary); then `Verdict: clean` or `Verdict: fix: <count>`, the answers, the findings under `## Findings` as `- F<n>: …`, `## Found on the way`, `## Notes`, `## Questions`.
 
 **You return** one line: `verify <sha>: clean | fix: <count> | raise to <lane> — <path>, found <n> (<u> urgent), questions <n>`.
