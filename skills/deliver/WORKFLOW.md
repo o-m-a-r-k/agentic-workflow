@@ -80,6 +80,7 @@ People are failing in production now. The order changes; nothing is skipped for 
 - **Fresh agents check.** The one who checks never wrote what it checks, and works from raw sources: the code, git, logs, data, the running app.
 - **Grounded.** A claim names its source: `file:line` at a named commit, a query and its result, a log line, a screenshot, an external source opened. Whoever passes a claim on says whether it was found or proposed.
 - **Prove by running.** Whatever the project's environments can produce (a state, an account, data) is produced and checked, never reported as unchecked. Only what cannot be produced there (a real third party, real money, elapsed time) is reported, first, as work not done.
+- **A changed run condition changes what was proven.** Preserve a failed run when retrying with fewer workers, less load, a different timeout or a narrower selection. Compare the conditions and investigate the original failure. A passing retry proves its own conditions; it closes the original failure only with evidence that explains it and verifies the applicable acceptance conditions. Otherwise keep the failure open for triage under the same acceptance rules. Record its disposition and any remaining uncertainty in the user handoff.
 - **A sentence is not an answer.** What a person sees is judged by the `design` skill. An answer the screen gives only in a sentence counts as not given.
 - **Files, not memory.** The ticket folder is the state.
 
