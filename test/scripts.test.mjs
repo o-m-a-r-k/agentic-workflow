@@ -134,6 +134,21 @@ test('lane --paths: the brief\'s paths, as written and as the base files they na
   f.done();
 });
 
+test('lane reports a boundary, watch or migration entry that takes no file at its repo\'s base, and does not stop', () => {
+  const f = ticket({ web: true });
+  f.state('', 'critical');
+  f.brief('critical', ['catalog/src/fees/fee.ts']);
+  let r = f.L('--paths');
+  assert.equal(r.status, 0, r.stdout);
+  assert.doesNotMatch(r.stdout, /stale/, 'entries that take files, negations and repos with no worktree are not judged');
+  f.defWith(undefined, 'watch:\n  old: [catalog/src/gone/**, web/src/pages/**]\n');
+  r = f.L('--paths');
+  assert.equal(r.status, 0, 'a stale entry is a note, not a stop');
+  assert.match(r.stdout, /^- stale, takes no file at its repo's base: watch old: catalog\/src\/gone\/\*\*;/m);
+  assert.doesNotMatch(r.stdout, /web\/src\/pages/, 'an entry that takes files is not stale');
+  f.done();
+});
+
 test('lane from the diff: the files each worktree changed since its base; a migration raises the floor whatever the brief said', () => {
   const f = ticket({ web: true });
   let r = f.L();

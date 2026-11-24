@@ -22,7 +22,7 @@ For a bug: the reproduction, the root cause with its `file:line`, and where else
 
 ## Approach
 
-A few lines: what changes, where. On the critical lane, `See DESIGN.md.`
+A few lines: what changes, where, and the existing code it builds on (`file:line`), or `None found:` and what was searched. On the critical lane, that code and `See DESIGN.md.`
 
 ## Paths
 
