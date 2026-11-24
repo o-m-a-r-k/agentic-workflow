@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.3
+
+From a review of an outside design-review plugin against this method: nothing of its pipeline was worth adding, and the review found a gap this method has: a boundary, watch or migration entry that matches no file at its repo's base stops setting the floor when the code it named moves, with no sign.
+
+- **`lane` reports an entry that takes no file at its repo's base** (a boundary, watch or migration entry, for a repo the ticket has a worktree for) as a note under the result. It does not stop: the definition, not the ticket, is what is stale.
+- **The brief's Approach names the existing code the change builds on** (`file:line`), or `None found:` and what was searched, on every lane. Replayed with fresh agents on two small projects, Discover found the existing rule with and without the line; with it, every brief said where it lives.
+
 ## 0.17.2
 
 From late findings reduced to notes by their arrival time, and failures left unexplained after a retry passed with fewer workers.

@@ -261,10 +261,20 @@ export function laneFacts(T, def, fromBrief) {
     }
   }
   const any = (take, x) => x.forms.some((f) => take(f));
+  // A boundary, watch or migration entry that takes no file at its repo's base maps nothing: a moved path would stop
+  // setting the floor with no sign. Entries of repos the ticket has no worktree for, or with no repo first, are not judged.
+  const baseFiles = {}, stale = [];
+  const listed = [...Object.entries(def.lists('boundaries')).map(([k, g]) => [`boundary ${k}`, g]), ...Object.entries(def.lists('watch')).map(([k, g]) => [`watch ${k}`, g]), ['migrations', def.list('migrations') || []]];
+  for (const [what, globs] of listed) for (const g of globs.map(normPath)) {
+    const repo = g.split('/')[0], w = !g.startsWith('!') && /^[^*?]+$/.test(repo) && T.repos.find((x) => x.name === repo);
+    if (!w) continue;
+    const files = (baseFiles[repo] ??= (filesAt(w.path, w.base || 'HEAD') || []).map((f) => `${repo}/${f}`));
+    if (files.length && !files.some(matcher([g]))) stale.push(`${what}: ${g}`);
+  }
   const kinds = boundaries.map((b) => ({ kind: b.kind, paths: paths.filter((x) => any(b.take, x)).map((x) => x.path) })).filter((b) => b.paths.length);
   const watched = Object.entries(def.lists('watch')).map(([kind, globs]) => { const take = matcher(globs); return { kind, paths: paths.filter((x) => any(take, x)).map((x) => x.path) }; }).filter((b) => b.paths.length);
   const migrations = paths.filter((x) => any(migration, x)).map((x) => x.path);
-  return { boundaries: boundaries.length, paths, notes, unplaced, kinds, watched, migrations, pages: paths.filter((x) => x.added && page(x.path)).map((x) => x.path), screenTouched: paths.some((x) => any(screen, x)), floor: kinds.length || migrations.length || T.undo === 'no' ? 'critical' : 'none' };
+  return { boundaries: boundaries.length, stale, paths, notes, unplaced, kinds, watched, migrations, pages: paths.filter((x) => x.added && page(x.path)).map((x) => x.path), screenTouched: paths.some((x) => any(screen, x)), floor: kinds.length || migrations.length || T.undo === 'no' ? 'critical' : 'none' };
 }
 
 // The gate as the definition and the current diff make it: each `gate:` entry, what selects it and the files that
