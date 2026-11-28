@@ -206,10 +206,10 @@ export function proofRules(T, def) {
   const changeFiles = (w) => (changed[w.name] ??= w.base ? names(w, w.base, 'HEAD') : []);
   const patch = (w, a, b) => { const t = git(w.path, 'diff', a, b); try { return t ? execFileSync('git', ['patch-id', '--stable'], { cwd: w.path, input: t + '\n', encoding: 'utf8' }).split(' ')[0] : ''; } catch { return ''; } };
   // Commit c stands for HEAD when it exists, holds the change (its tree isn't the base's while HEAD's is not), is HEAD's
-  // ancestor or the same change on a moved base, and what differs since touches none of the change's files but tests
-  // and the files in `also`. So a merge that changes no byte, or a base move that leaves the change's files alone, keeps
-  // what was proven.
-  const stands = (w, c, also = []) => {
+  // ancestor or the same change on a moved base, and what differs since touches none of the change's files but tests.
+  // So a merge that changes no byte, or a base move that leaves the change's files alone, keeps what was proven. A
+  // command's run executed the tests of its repository too, so there its commit (`ranStands`) stands only while they do.
+  const stands = (w, c, ran = false) => {
     const t = c && git(w.path, 'rev-parse', `${c}^{tree}`);
     if (!t) return false;
     if (t === w.tree) return true;
@@ -217,13 +217,14 @@ export function proofRules(T, def) {
     const rebased = () => { const b = w.baseRef, p1 = b && patch(w, git(w.path, 'merge-base', c, b), c); return !!p1 && p1 === patch(w, w.base, 'HEAD'); };
     if (git(w.path, 'merge-base', '--is-ancestor', c, 'HEAD') === null && !rebased()) return false;
     const mine = changeFiles(w);
-    return names(w, c, 'HEAD').every((f) => !mine.includes(f) || isTestFile(f) || also.some((x) => pathIs(f, x, w.name)));
+    return names(w, c, 'HEAD').every((f) => !mine.includes(f) || (!ran && isTestFile(f)));
   };
+  const ranStands = (w, c) => stands(w, c, true);
   // A run ran something: an exit code, and output that matches no nothing_ran pattern. A green ran on HEAD's tree, or
-  // on a commit that stands for HEAD with a clean worktree.
+  // on a commit whose run stands for HEAD with a clean worktree.
   const ran = (p) => typeof p.exit === 'number' && !nothingRan.some((x) => matches(p.log || '', x));
-  const isGreen = (p) => { const w = W(p); return !!w && !p.base && ran(p) && p.exit === 0 && (p.tree === w.tree || (p.tree === git(w.path, 'rev-parse', `${p.head}^{tree}`) && stands(w, p.head))); };
-  return { isTest: isTestFile, isTestFile, stands, isGreen, ran, worktreeOf: W, changeFiles };
+  const isGreen = (p) => { const w = W(p); return !!w && !p.base && ran(p) && p.exit === 0 && (p.tree === w.tree || (p.tree === git(w.path, 'rev-parse', `${p.head}^{tree}`) && ranStands(w, p.head))); };
+  return { isTest: isTestFile, isTestFile, stands, ranStands, isGreen, ran, worktreeOf: W, changeFiles };
 }
 
 // Whether HEAD contains the tip of the base ref STATE.md names (origin/<from>, else <from>; local refs, no fetch),

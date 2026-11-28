@@ -99,7 +99,7 @@ const standsAll = (t) => {
   else {
     const bad = due.flatMap((c) => {
       const x = (cj.results || []).find((y) => y.id === c.id);
-      return !x ? [`${c.id} never ran`] : !x.ok ? [`${c.id} failed`] : x.spec !== specOf(c, def) ? [`${c.id} changed since it ran`] : !T.repos.every((w) => R.stands(w, x.heads?.[w.name])) ? [`${c.id} ran on commits that no longer stand`] : [];
+      return !x ? [`${c.id} never ran`] : !x.ok ? [`${c.id} failed`] : x.spec !== specOf(c, def) ? [`${c.id} changed since it ran`] : !T.repos.every((w) => (/^cmd:/.test(c.verify) && w.name === (c.in || T.repos[0]?.name) ? R.ranStands : R.stands)(w, x.heads?.[w.name])) ? [`${c.id} ran on commits that no longer stand`] : [];
     });
     row('checks', bad.length ? fail(bad.join(', ')) : `ok (${due.length} due)`);
   }

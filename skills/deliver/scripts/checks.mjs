@@ -10,8 +10,8 @@
 //     unless DESIGN.md's "Oracles changed:" line names it: then the worktree's copy runs. Any other runs in the worktree
 //     named by "in" (default: the first in STATE.md). {worktree} and {ticket} become those folders' paths. It passes
 //     when it exits 0, its output holds expect (or matches /regex/flags), and matches none of nothing_ran.
-//     A pass stands while every worktree's commit it ran on stands for HEAD (ticket.mjs), and a green proof line with
-//     the same words on a commit that stands is adopted; neither runs again. An oracle always runs.
+//     A pass stands while every worktree's commit it ran on stands for HEAD, its own repo's tests included (ticket.mjs),
+//     and a green proof line with the same words on such a commit is adopted; neither runs again. An oracle always runs.
 //   verify "walk: <steps>": passes when evidence/walk-<id>.md has the lines "Check: <id>", "Commit: <repo>@<sha>" on a
 //     commit that stands, "Result: pass" and "Seen: <what was seen>".
 // One run per ticket (evidence/checks.run, see runner.mjs); --stop ends it. A stopped run writes no results, and a run
@@ -37,7 +37,8 @@ if (T.checksError) { console.error(`checks: CHECKS.json: ${T.checksError}`); pro
 const R = proofRules(T, def);
 const W = Object.fromEntries(T.repos.map((w) => [w.name, w]));
 const heads = Object.fromEntries(T.repos.map((w) => [w.name, w.head])), trees = Object.fromEntries(T.repos.map((w) => [w.name, w.tree]));
-const allStand = (hs = {}) => T.repos.every((w) => R.stands(w, hs[w.name]));
+// A command's pass stands while its own repository's tests stand too; another repository's tests it never ran.
+const allStand = (hs = {}, repo) => T.repos.every((w) => (w.name === repo ? R.ranStands : R.stands)(w, hs[w.name]));
 let last = null;
 try { last = JSON.parse(read(join(T.ev, 'checks.json'))); } catch {}
 R0.hold();
@@ -80,7 +81,7 @@ for (const c of order) {
   const sub = argv.map((a) => (own.includes(a) ? where(a) : a.replaceAll('{worktree}', w.path).replaceAll('{ticket}', dir)));
   const holds = (out) => !nothingRan.find((p) => matches(out, p)) && matches(out, c.expect);
   // The same check passed on commits that stand, or a green proof line ran these words on one: it stands, unrun.
-  const kept = !own.length && last?.results?.find((x) => x.id === c.id && x.ok && x.spec === spec && allStand(x.heads));
+  const kept = !own.length && last?.results?.find((x) => x.id === c.id && x.ok && x.spec === spec && allStand(x.heads, repo));
   const proof = !own.length && T.proofs.findLast((p) => p.repository === w.repository && R.isGreen(p) && JSON.stringify(p.argv) === JSON.stringify(sub) && holds(p.log || ''));
   if (kept) { Object.assign(r, { ok: true, log: kept.log, heads: kept.heads, line: `${label(c)}: pass (stands from ${kept.heads[repo]?.slice(0, 12)})` }); continue; }
   if (proof) {

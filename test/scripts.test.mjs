@@ -455,11 +455,46 @@ test('a walk stands after a change to tests alone, not after any other change, a
   write(join(f.cat.path, 'src/loans/renew.test.ts'), RENEW_TEST + '// one more\n');
   commit(f.cat.path, 'a test');
   assert.match(f.C().stdout, /C5: pass/);
+  write(join(f.cat.path, 'src/loans/renew.test.ts'), RENEW_TEST + '// and another\n');
+  commit(f.cat.path, 'another test');
+  assert.doesNotMatch(f.R().stdout, /C5 ran on commits that no longer stand/, "ready keeps a walk's result across a test edit");
   write(join(f.cat.path, 'src/loans/other.ts'), 'x\n');
   commit(f.cat.path, 'another change');
   assert.match(f.C().stdout, /C5: fail: .*doesn't stand/);
   walked(f, 'C5', f.cat.sha);
   assert.match(f.C().stdout, /C5: fail: .*doesn't stand/);
+  f.done();
+});
+
+test('a run stops standing when the change\'s tests change: a kept pass, an adopted proof line and ready\'s checks row', () => {
+  const f = ticket();
+  edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>');
+  commit(f.cat.path, 'fix');
+  f.P('--in', 'catalog', '--', 'node', 'test/renew.mjs');
+  f.checks([{ id: 'C2', proves: 'renews', surface: [], verify: 'cmd: node test/renew.mjs', in: 'catalog', expect: '1 test passed', due: 'before delivery' }]);
+  assert.match(f.C().stdout, /C2: pass \(adopted from proof/);
+  assert.match(f.C().stdout, /C2: pass \(stands from [0-9a-f]{12}\)/);
+  write(join(f.cat.path, 'test/renew.mjs'), "console.log('1 test passed');\nprocess.exit(1);\n");
+  commit(f.cat.path, 'a test the check runs, now failing');
+  const row = (n) => (f.R().stdout.match(new RegExp(`^\\| ${n} \\| (.*) \\|$`, 'm')) || [])[1];
+  assert.match(row('checks'), /C2 ran on commits that no longer stand/);
+  assert.match(f.C().stdout, /C2: fail: exit 1/, 'neither the kept pass nor the green proof line before the test edit stands');
+  f.done();
+});
+
+test('a test edit in another repository leaves a command\'s pass standing', () => {
+  const f = ticket({ web: true });
+  edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>');
+  commit(f.cat.path, 'fix');
+  write(join(f.w.path, 'src/pages/loan.tsx'), 'export const Loan = () => 1;\n');
+  commit(f.w.path, 'the page');
+  f.checks([{ id: 'C2', proves: 'renews', surface: [], verify: 'cmd: node test/renew.mjs', in: 'catalog', expect: '1 test passed', due: 'before delivery' }]);
+  assert.match(f.C().stdout, /C2: pass$/m);
+  write(join(f.w.path, 'src/pages/loan.test.tsx'), '// renders\n');
+  commit(f.w.path, 'a page test');
+  assert.match(f.C().stdout, /C2: pass \(stands from [0-9a-f]{12}\)/);
+  const row = (n) => (f.R().stdout.match(new RegExp(`^\\| ${n} \\| (.*) \\|$`, 'm')) || [])[1];
+  assert.doesNotMatch(row('checks'), /no longer stand/);
   f.done();
 });
 

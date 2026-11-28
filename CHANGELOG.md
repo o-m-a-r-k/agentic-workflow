@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.4
+
+From a confirmer that re-ran two checks by hand because `checks` reported them standing after only test files changed. Across six tickets, 45 of 134 kept passes had been kept across edits to the change's own tests.
+
+- **A command's result stands only while its repository's tests stand.** `stands` let a test edit keep any earlier proof. A command ran those tests, so its kept pass in `checks`, a green proof line `checks` would adopt, and `ready`'s checks row now need a run on a commit where the change's tests in the check's own repository are as at HEAD. A green proof line run on HEAD after the edit is still adopted, and a test edit in another repository reruns nothing. Walks and verification reports keep the earlier rule.
+- `stands` loses its unused `also` parameter.
+
 ## 0.17.3
 
 From a review of an outside design-review plugin against this method: nothing of its pipeline was worth adding, and the review found a gap this method has: a boundary, watch or migration entry that matches no file at its repo's base stops setting the floor when the code it named moves, with no sign.
